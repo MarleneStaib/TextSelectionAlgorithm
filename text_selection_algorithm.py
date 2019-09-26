@@ -7,74 +7,32 @@ TEXT SELECTION ALGORITHM SCRIPT
 
 @author: marlene
 """
-#IMPORTS
-import re
+import os
+import argparse
 import numpy as np
+import shutil
 import matplotlib.pyplot as plt
-
-#################
-# CONFIGURATION #
-#################
+from scipy.io.wavfile import read
 
 
-DEBUG = 1000
-ARCTIC = 60000
-FULL = 581905
-corpus_size = DEBUG #flexible corpus size; set to DEBUG, ARCTIC (use as many 
-#sentences as in the ARCTIC paper) or FULL (use all available sentences)
-num_sentences = 10 #the number of sentences to be selected. set to the size of ARCTIC A
-#input and output files
-utt_file = "example_utts.txt" #the file containing flat festival utterances
-text_file = "example_text.txt" #the file containing the original sentences
-#in the same order as utt_file
-out_file = "selected_text.txt" #the file to write the selected output to
-utts_out = "selected_utts.txt" #keep the selected utterances also in a file
-
-#names of the different wishlists/base type configurations
-names = ["phones", "diphones", "triphones", "phones_stress", "diphones_stress", "triphones_stress"]
-#choose a base type and wishlist
-base_unit = "diphones" # "phones", "diphones" or "triphones"
-stress = True #True/False; set true to consider stress as a factor
-scoring_type = 2 #1 or 2; choose 2 for negative log-prob weights
-
-#keep track of the sentences selected, to avoid selecting duplicates 
-#(in case score drops to 0)
+# keep track of the sentences selected, to avoid selecting duplicates
+# (in case score drops to 0)
 selected_sentence_ids = set()
 selected_zeros = 0
+
+# save np.load
+np_load_old = np.load
+
+# modify the default parameters of np.load
+np.load = lambda *a,**k: np_load_old(*a, allow_pickle=True, **k)
 
 
 ##################
 # CORE FUNCTIONS #
 ##################
 
-
-def utt_to_phonesets(line):
-    """find the phones/stressed phones in a flattened festival utterance"""
-    #strip the utterance number away
-    line = re.sub("utt[0-9]+", "", line)
-    #replace the break symbols by silence; here I just assume silence for 
-    #either a small (B) or big break (BB)
-    line = re.sub("BB?", "(0 sil )", line)
-    #words = line.split("}{")
-    syllables = re.findall("\(([0-9] (?:[a-z@!\^]+ *)+)\)", line)
-    #pad the phones with an extra 'sil' in the beginning
-    phonlist = ["sil"] + re.findall("[a-z@!\^]+", line)
-    stressed_phones = ["sil"]
-    for syl in syllables:
-        #find the stress for that syl, either 0,1,2 or 3
-        syl_tmp = syl.split()
-        stress = syl_tmp[0]
-        #add the stress to every vowel, add them to the list of stressed phones
-        for p in syl_tmp[1:]:
-            if re.match("[aeiou@]", p): 
-                stressed_phones.append(stress + p)
-            else:
-                stressed_phones.append(p)
-    return phonlist, stressed_phones
-
-
-#turn every sentence into a binary numpy array, indicating the base types present
-def prepare_sentences(base_type, wishlist_ids, stress=False):
+# turn every sentence into a binary numpy array, indicating the base types present
+def prepare_sentences(phones_dir, base_type, wishlist_ids):
     """
     pass over the corpus and turn every sentence into a binary array of length wishlist.
     base_type: phone, diphone or triphone, type: str
@@ -83,44 +41,36 @@ def prepare_sentences(base_type, wishlist_ids, stress=False):
     stress: whether stress is taken into account or not
     returns: array of arrays, i.e. dataset
     """
-    #initialize an empty np.array to store the sentences
-    #shape is defined by the number of sentences and the length of the wishlist
-    #the latter gives the dimensionality to each sentence array
-    sentences = np.zeros((corpus_size, wishlist_ids.shape[0]))
-    i = 0 #keep a counter, to index into the np.array above
-    with open(utt_file, "r") as corpus:
-        for line in corpus.readlines()[:corpus_size]:
-            if line.startswith("utt"):
-                phones, stressed_phones = utt_to_phonesets(line)
-                
-                #get the right units from the phones, depending on unit type and stress
-                #stress or no stress
-                phonlist = phones if stress == False else stressed_phones
-                
-                #unit type
-                if base_type == "phones":
-                    units = phonlist
-                
-                if base_type == "diphones":
-                    units = ["{}_{}".format(phonlist[i], phonlist[i+1]) for i in\
-                             range(len(phonlist)-1)]
+    corpus = os.listdir(phones_dir)
+    # initialize an empty np.array to store the sentences
+    # shape is defined by the number of sentences and the length of the wishlist
+    # the latter gives the dimensionality to each sentence array
+    sentences = np.zeros((len(corpus), wishlist_ids.shape[0]))
+    i = 0 # keep a counter, to index into the np.array above
+    for f in corpus:
+        phonlist = open(os.path.join(phones_dir, f)).read().strip().split()
+
+        if base_type == "diphones":
+            units = ["{}_{}".format(phonlist[i], phonlist[i+1]) for i in
+                     range(len(phonlist)-1)]
                         
-                if base_type == "triphones":
-                    #add extra padding
-                    pad_phones = phonlist + ["sil"]
-                    units = ["{}^{}+{}".format(pad_phones[i], pad_phones[i+1],\
-                             pad_phones[i+2])for i in range(len(pad_phones)-2)]
+        if base_type == "triphones":
+            # add extra padding
+            pad_phones = phonlist + ["</s>"]
+            units = ["{}^{}+{}".format(pad_phones[i], pad_phones[i+1],
+                                       pad_phones[i+2])
+                     for i in range(len(pad_phones)-2)]
                 
-                #binarize them
-                for unit in units: 
-                    idx = np.where(wishlist_ids==unit)[0][0]
-                    sentences[i][idx] = 1
-            i += 1
+        # binarize them
+        for unit in units:
+            idx = np.where(wishlist_ids == unit)[0][0]
+            sentences[i][idx] = 1
+        i += 1
             
-    return sentences
+    return sentences, corpus
 
 
-#scoreing function: dot each sentence with the wishlist
+# scoreing function: dot each sentence with the wishlist
 def score_dataset(dataset, wishlist):
     """
     takes in a binarized data set array of sentences, where every sentence is an array).
@@ -130,23 +80,23 @@ def score_dataset(dataset, wishlist):
     global selected_zeros
     scores = []
     for sentence in dataset:
-        #do the dot product; append to scores
+        # do the dot product; append to scores
         scores.append(np.dot(sentence, wishlist))
-    i=0 #use the first match in case of tie; iterate to avoid duplication in case
-    #they all drop to 0
+    i = 0  # use the first match in case of tie; iterate to avoid duplication in case
+    # they all drop to 0
     while True:
-        best_sentence_id = np.where(scores==np.max(scores))[0][i]
+        best_sentence_id = np.where(scores == np.max(scores))[0][i]
         if best_sentence_id in selected_sentence_ids:
-            i+=1 #go to the next sentence
+            i += 1  # go to the next sentence
         else:
             if np.max(scores) == 0:
-                selected_zeros +=1
+                selected_zeros += 1
             selected_sentence_ids.add(best_sentence_id)
             return best_sentence_id
 
 
-#main algorithm
-def text_selection(base_type, stress=False, scoring_type=1):
+# main algorithm
+def text_selection(in_dir, out_dir, base_type, scoring_type):
     """
     greedy selection of highest-scoring sentences, according to a wishlist.
     wishlist is a numpy array of either all 1s or weights/probabilities (for each
@@ -158,38 +108,51 @@ def text_selection(base_type, stress=False, scoring_type=1):
     scoring_type: 1 for vanilla, scoring each unit equally, 2 for weighted scores
     num_sentences: the number of sentences selected
     """
-    #load the wishlist and unit ids
-    name_extension = "_stress" if stress == True else ""
-    name = base_type + name_extension
+    # load the wishlist and unit ids
+    name = base_type
     wishlist = np.load("{}_wishlist{}.npy".format(name, scoring_type))
     ids = np.load("{}_ids.npy".format(name))
+    corpus_t = 0  # the total number of seconds in the corpus so far
 
-    #load the data set
-    dataset = prepare_sentences(base_type, ids, stress=stress)
+    # load the data set
+    phones_dir = os.path.join(in_dir, 'phonemes')
+    dataset, filenames = prepare_sentences(phones_dir, base_type, ids)
     
-    #distribution = np.zeros(wishlist.shape)
-    for it in range(num_sentences): #select as many sentences as specified
+    while corpus_t < 3600:
         best_sentence_id = score_dataset(dataset, wishlist)
-        #print(best_sentence_id)
-        #select the sentence from the original dataset and write to a file
-        with open(text_file, "r") as text:
-            outstring = text.readlines()[best_sentence_id]
-        with open(out_file, "a") as output:
-            output.write(outstring)
-        with open(utt_file, "r") as text:
-            outstring = text.readlines()[best_sentence_id]
-        with open(utts_out, "a") as output:
-            output.write(outstring)
+        # select the sentence from the original dataset and write to a file
+        sourcedir = os.path.join(in_dir, 'phonemes', filenames[best_sentence_id])
+        targetdir = os.path.join(out_dir, 'phonemes', filenames[best_sentence_id])
+        shutil.copyfile(sourcedir, targetdir)
+
+        # also copy the mel
+        sourcedir = os.path.join(in_dir, 'mel',
+                                 filenames[best_sentence_id].replace('.txt', '.npy'))
+        targetdir = os.path.join(out_dir, 'mel',
+                                 filenames[best_sentence_id].replace('.txt', '.npy'))
+        shutil.copyfile(sourcedir, targetdir)
+
+        # asses the length of wav
+        wavfile = os.path.join(in_dir, 'wav_24khz',
+                               filenames[best_sentence_id].replace('.txt', '.wav'))
+        sr, w = read(wavfile)
+        l = len(w) / sr
+        # add that to the total length of selected corpus
+        corpus_t += l
+
         best_sentence_arr = dataset[best_sentence_id]
-        #delete the selected sentence from the wishlist    
+        # delete the selected sentence from the wishlist
         wishlist[np.where(best_sentence_arr != 0)] = 0
-        #add the new sentence to the distribution
-        #distribution = distribution + best_sentence_arr
+        # add the new sentence to the distribution
+        # distribution = distribution + best_sentence_arr
         
-    #return distribution
+    # return distribution
+    print("number of units selected: {} out of {}".format(len(wishlist) -
+                                                          len(np.where(wishlist == 0)),
+                                                          len(wishlist)))
 
 
-#plot the resulting distributions
+# plot the resulting distributions
 def plot_dist(dist_array, name, plotname):
     f = plt.figure()
     plt.bar(range(dist_array.shape[0]), dist_array.sort_values(ascending=False))
@@ -208,13 +171,23 @@ def plot_dist(dist_array, name, plotname):
 
 
 def main():
-    #baseline: randomly sample 5XX sentences, measure coverage
-    #call text_selection for different base types/wishlists
-    #wishlist1 gives equal weight to all new base units
-    text_selection(base_unit, stress=stress, scoring_type=scoring_type)
+    # baseline: randomly sample 5XX sentences, measure coverage
+    # call text_selection for different base types/wishlists
+    # wishlist1 gives equal weight to all new base units
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data', type=str, required=True, help='Phonemes directory')
+    parser.add_argument('--out-dir', type=str, required=True, help='Target directory')
+    parser.add_argument('--unit-type', type=str, default='diphones',
+                        help='diphones/triphones')
+    parser.add_argument('--scoring-type', type=int, default=2,
+                        help='choose 2 for negative log probabilities')
+    ARGS = parser.parse_args()
+    os.makedirs(os.path.join(ARGS.out_dir, 'phonemes'), exist_ok=True)
+    os.makedirs(os.path.join(ARGS.out_dir, 'mel'), exist_ok=True)
 
-    #measure the resulting coverage of phones/diphones/triphones
+    text_selection(ARGS.data, ARGS.out_dir, ARGS.unit_type, scoring_type=ARGS.scoring_type)
+
 
 if __name__ == "__main__":
     main()
-    print(selected_zeros)
+    print("selected zeros:", selected_zeros)
