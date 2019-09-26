@@ -135,10 +135,10 @@ def main():
     print("triphones: ", len(inventories[2].keys()))
     
     # plot their distributions, save the wishlists
-    # for i, inv in enumerate(inventories):
-    #     df = pd.DataFrame(list(inv.items()))
-    #     plot_dist(df, names[i], plotnames[i])
-    #     save_wishlists(df, names[i])
+    for i, inv in enumerate(inventories):
+        df = pd.DataFrame(list(inv.items()))
+        plot_dist(df, names[i], plotnames[i])
+        save_wishlists(df, names[i])
     
 
 if __name__ == "__main__":
