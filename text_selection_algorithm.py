@@ -118,7 +118,8 @@ def text_selection(in_dir, out_dir, base_type, scoring_type):
     phones_dir = os.path.join(in_dir, 'phonemes')
     dataset, filenames = prepare_sentences(phones_dir, base_type, ids)
     
-    while corpus_t < 3600:
+    # while corpus_t < 3600:
+    while np.where(wishlist == 0)[0].shape[0] < wishlist.shape[0]:
         best_sentence_id = score_dataset(dataset, wishlist)
         # select the sentence from the original dataset and write to a file
         sourcedir = os.path.join(in_dir, 'phonemes', filenames[best_sentence_id])
@@ -147,9 +148,10 @@ def text_selection(in_dir, out_dir, base_type, scoring_type):
         # distribution = distribution + best_sentence_arr
         
     # return distribution
-    print("number of units selected: {} out of {}".format(len(wishlist) -
-                                                          len(np.where(wishlist == 0)),
-                                                          len(wishlist)))
+    print("number of units selected: {} out of {}".format(
+        np.where(wishlist == 0)[0].shape[0],
+          wishlist.shape[0]))
+    print("number of selected hours: {}".format(corpus_t / 3600))
 
 
 # plot the resulting distributions
